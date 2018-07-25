@@ -1,0 +1,157 @@
+---
+title: "AB Testing"
+author: "Yekun"
+output: pdf_document
+---
+
+```{r setup,include=FALSE,warning=FALSE,error=FALSE,message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(data.table)
+library(magrittr)
+library(bayesAB)
+library(MASS)
+```
+
+## Simulate data points
+
+To simulate a rare event, analogous to the low conversion event happen on web traffic sites, generate two samples of 180 data points each from a Poisson distribution. Let's assume that group B slightly outperforms group A. 
+
+```{r simulation,warning=FALSE,error=FALSE,message=FALSE}
+set.seed(5)
+A <- rpois(180, 1.1)
+B <- rpois(180, 1.2)
+
+ggplot() +
+  geom_line(data=data.frame(x=seq_along(A),A),aes(x=x,y=A),alpha=0.6) +
+  geom_line(data=data.frame(x=seq_along(B),B),aes(x=x,y=B),color="blue",alpha=0.6) +
+  ylab("counts") + 
+  xlab("time unit")
+```
+
+## Frequentist's approach: two-sample t-test
+
+```{r frenquentist hypothesis,warning=FALSE,error=FALSE,message=FALSE}
+# Check sample validity to see if the normal assumption holds.
+
+ggplot() +
+  geom_histogram(data=data.frame(group="A",A),aes(A), alpha = 0.2) +
+  geom_histogram(data=data.frame(group="B",B),aes(B), fill="blue",alpha = 0.2)
+```
+
+Obviously, normal assumption does not hold, because we know samples were drawn from a Poisson distribution. This section will proceed with two-sample t-test on existing data set, and the next section will focus on another bootstrap method.
+
+For experimental setup, I choose alpha (critical value) to be 10%, hence a 90% confidence internval. 
+
+H0: sample mean in group B equals to sample mean in group A, i.e. miu_B = miu_A
+
+HA: sample mean in group B is not equals sample mean in group A, i.e. miu_B != miu_A => two sided t-test
+
+```{r frenquentist two sample t,warning=FALSE,error=FALSE,message=FALSE}
+t.test(A,B,alternative="two.sided",conf.level = 0.9)
+```
+
+Results states that the probability of getting this level of difference is sample means is not less than 10% and the confidence interval [-0.4891416,0.1002527] contains zero. Therefore, the two sample t-test is inconclusive.
+
+Critical value is defined as the probability of observing test statistics given the null hypothesis is true. In other words, if the two sample means are exactly the same, what's the probability of observing this level of difference? 
+
+Power is defined as the probability of observing test statistics given the alternative hypothesis is true. In other words, if the sample means are different, what's the probability of observing this level of difference? 
+
+Assuming alpha = 0.1, test is targeting a power of 80%, difference between the two sample means is 0.5, and that the sample variances are the same between two groups (which we know is not true :p), we can derive power using normal distribution. 
+
+```{r frenquentist power and sample size,warning=FALSE,error=FALSE,message=FALSE}
+var_pooled = (var(A)*(length(A)-1) + var(B)*(length(B)-1))/(length(A) + length(B) -2)
+(test_sample_size = var_pooled/0.5^2*(qnorm(0.95)-qnorm(0.2))^2*2)
+```
+
+## Frequentist's approach: Bootstrap sample means
+
+Since the underlying normal distribution might not hold, we can take another approach at this problem by testing boostrapped means from two samples. We can  bootstrap sample means but repeated sampling and calculating mean. This way, the central limit theorem applies and makes sure that the boostrapped mean is normally distributed.
+
+```{r frequentist testing with bootstrap,warning=FALSE,error=FALSE,message=FALSE}
+# Set the number of bootstrap iterations
+
+n = 100
+A_sample_mu = rep(NA,n)
+for(i in 1:n){
+  A_sample_mu[i] = mean(sample(A,n,replace=TRUE))
+}
+
+B_sample_mu = rep(NA,n)
+for(i in 1:n){
+  B_sample_mu[i] = mean(sample(B,n,replace=TRUE))
+}
+
+ggplot() +
+  geom_histogram(data=data.frame(group="A",A_sample_mu),aes(A_sample_mu), alpha = 0.2) +
+  geom_histogram(data=data.frame(group="B",B_sample_mu),aes(B_sample_mu), fill="blue",alpha = 0.2)
+
+t.test(A_sample_mu,B_sample_mu,alternative="two.sided")
+
+
+```
+
+By bootstrapping, the difference between sample A and sample B becomes more obvious. 
+
+## Bayesian Approach
+
+```{r bayesian testing,warning=FALSE,error=FALSE,message=FALSE}
+
+p_A = 0.015
+p_B = 0.02
+n=10000
+
+A_imp=rpois(n,3)
+A_conv=rbinom(n,A_imp, p_A)
+A_par=data.frame(alpha=c(1,rep(NA,n)),beta=c(1,rep(NA,n)))
+
+B_imp=rpois(n,3)
+B_conv=rbinom(n,B_imp, p_B)
+B_par=data.frame(alpha=c(1,rep(NA,n)),beta=c(1,rep(NA,n)))
+
+for(i in 1:n){
+  A_par$alpha[i+1] = A_par$alpha[i] + A_conv[i]
+  A_par$beta[i+1] = A_par$beta[i] + A_imp[i]-A_conv[i]
+  
+  B_par$alpha[i+1] = B_par$alpha[i] + B_conv[i]
+  B_par$beta[i+1] = B_par$beta[i] + B_imp[i]-B_conv[i]
+}
+
+i=1000
+x=seq(0.01,0.25,0.00025)
+A_df=dbeta(x,A_par$alpha[i],A_par$beta[i])
+B_df=dbeta(x,B_par$alpha[i],B_par$beta[i])
+  
+ggplot() +
+  geom_line(data=data.frame(x,density=A_df),aes(x,density), alpha = 0.2) +
+  geom_line(data=data.frame(x,density=B_df),aes(x,density), alpha = 0.2,color ="blue") 
+
+
+A_sim <- rbeta(1e6, A_par$alpha[i], A_par$beta[i])
+B_sim <- rbeta(1e6, B_par$alpha[i], B_par$beta[i])
+
+(sim <- mean(A_sim > B_sim))
+
+credible_interval_approx <- function(a, b, c, d) {
+  u1 <- a / (a + b)
+  u2 <- c / (c + d)
+  var1 <- a * b / ((a + b) ^ 2 * (a + b + 1))
+  var2 <- c * d / ((c + d) ^ 2 * (c + d + 1))
+  
+  mu_diff <- u2 - u1
+  sd_diff <- sqrt(var1 + var2)
+  
+  data_frame(posterior = pnorm(0, mu_diff, sd_diff),
+             estimate = mu_diff,
+             conf.low = qnorm(.025, mu_diff, sd_diff),
+             conf.high = qnorm(.975, mu_diff, sd_diff))
+}
+
+credible_interval_approx(A_par$alpha[i],A_par$beta[i],B_par$alpha[i],B_par$beta[i])
+
+# # bay_test1=bayesTest(A[1:5], B[1:5], priors = c('shape' = 1, 'rate' = 1), distribution = 'poisson')
+# # summary(bay_test1)
+# # plot(bay_test1)
+
+```
+
